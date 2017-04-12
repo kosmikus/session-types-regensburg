@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -113,3 +114,53 @@ server =
   branch
     (receive $ \ i1 -> receive $ \ i2 -> send (i1 + i2) $ done)
     (receive $ \ c -> send (ord c) $ done)
+
+{-
+class Monad (m :: Type -> Type) where
+  return :: a -> m a
+  (>>=) :: m a -> (a -> m b) -> m b
+-}
+
+class IxMonad (m :: ix -> ix -> Type -> Type) where
+  ireturn :: a -> m s s a
+  (>>>=)  :: m s t a -> (a -> m t u b) -> m s u b
+
+{-
+data Session m (st :: SessionType) where
+  Send :: a -> Session m st -> Session m (a :!> st)
+  Receive :: (a -> Session m st) -> Session m (a :?> st)
+  Done :: Session m End
+  Lift :: m a -> (a -> Session m st) -> Session m st
+  Branch :: Session m st1 -> Session m st2 -> Session m (st1 :&&: st2)
+  Sel1 :: Session m st1 -> Session m (st1 :||: st2)
+  Sel2 :: Session m st2 -> Session m (st1 :||: st2)
+-}
+
+newtype Session_ m st1 st2 a =
+  MkSession_ { runSession_ :: (a -> Session m st2) -> Session m st1 }
+
+instance Monad m => IxMonad (Session_ m) where
+  ireturn a = MkSession_ (\ k -> k a)
+  MkSession_ s1 >>>= f2 =
+    MkSession_ (\ k -> s1 (\ a -> runSession_ (f2 a) k))
+
+(>>>) :: IxMonad m => m s t a -> m t u b -> m s u b
+s1 >>> s2 = s1 >>>= const s2
+
+infixr 5 >>>
+
+isend :: a -> Session_ m (a :!> st) st ()
+isend a = MkSession_ (\ k -> send a (k ()))
+
+ireceive :: Session_ m (a :?> st) st a
+ireceive = MkSession_ (\ k -> receive k)
+
+ilift :: m a -> Session_ m st st a
+ilift m = MkSession_ (\ k -> lift m k)
+
+ex1 = isend False >>> isend 'x' >>> isend True
+ex2 = ireceive >>>= \ x1 -> ireceive >>>= \ x2 -> ireturn (x1 ++ x2)
+ex3 = ex1 >>> ex2
+
+toSession :: Session_ m st End a -> Session m st
+toSession (MkSession_ f) = f (const Done)
