@@ -4,6 +4,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RebindableSyntax #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -12,6 +13,12 @@ module Sessions where
 
 import Data.Char
 import Data.Kind
+import Prelude hiding ((>>=), (>>), return)
+import qualified Prelude as P
+
+ifThenElse :: Bool -> a -> a -> a
+ifThenElse True  t e = t
+ifThenElse False t e = e
 
 data SessionType =
     Type :!> SessionType
@@ -68,10 +75,10 @@ example =
   send 65 $ receive $ \ c -> lift_ (print c) $ send (ord c) $ done
 
 match :: (Dual (Dual st) ~ st, Monad m) => Session m st -> Session m (Dual st) -> m ()
-match Done Done = return ()
+match Done Done = P.return ()
 match (Send a1 k1) (Receive k2) = match k1 (k2 a1)
 -- match (Receive k1) (Send a2 k2) = match (k1 a2) k2
-match (Lift m1 k1) s2 = m1 >>= \ a -> match (k1 a) s2
+match (Lift m1 k1) s2 = m1 P.>>= \ a -> match (k1 a) s2
 -- match s1 (Lift m2 k2) = m2 >>= \ a -> match s1 (k2 a)
 match (Branch k1 _) (Sel1 k2) = match k1 k2
 match (Branch _ k1) (Sel2 k2) = match k1 k2
@@ -158,9 +165,21 @@ ireceive = MkSession_ (\ k -> receive k)
 ilift :: m a -> Session_ m st st a
 ilift m = MkSession_ (\ k -> lift m k)
 
-ex1 = isend False >>> isend 'x' >>> isend True
-ex2 = ireceive >>>= \ x1 -> ireceive >>>= \ x2 -> ireturn (x1 ++ x2)
-ex3 = ex1 >>> ex2
+ex1 = do
+  isend False
+  isend 'x'
+  isend True
+ex2 = do
+  x1 <- ireceive
+  x2 <- ireceive
+  return (x1 ++ x2)
+ex3 = do
+  ex1
+  ex2
 
 toSession :: Session_ m st End a -> Session m st
 toSession (MkSession_ f) = f (const Done)
+
+return = ireturn
+(>>=) = (>>>=)
+(>>) = (>>>)
