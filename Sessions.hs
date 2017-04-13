@@ -25,10 +25,15 @@ data SessionType =
   | Type :?> SessionType
   | SessionType :&&: SessionType -- offer a choice, \&
   | SessionType :||: SessionType -- select an option, \oplus
+  | Mu SessionType
+  | Var
+  | Wk SessionType
   | End
 
 infixr 5 :!>
 infixr 5 :?>
+infixr 3 :&&:
+infixr 3 :||:
 
 type ExampleSession =
   Int :!> Char :?> Int :!> End
@@ -38,55 +43,73 @@ type family Dual (st :: SessionType) :: SessionType where
   Dual (a :?> st) = a :!> Dual st
   Dual (st1 :&&: st2) = Dual st1 :||: Dual st2
   Dual (st1 :||: st2) = Dual st1 :&&: Dual st2
+  Dual (Mu st) = Mu (Dual st)
+  Dual Var = Var
+  Dual (Wk st) = Wk (Dual st)
   Dual End        = End
 
 -- continuation-based interface
 
-data Session m (st :: SessionType) where
-  Send :: a -> Session m st -> Session m (a :!> st)
-  Receive :: (a -> Session m st) -> Session m (a :?> st)
-  Done :: Session m End
-  Lift :: m a -> (a -> Session m st) -> Session m st
-  Branch :: Session m st1 -> Session m st2 -> Session m (st1 :&&: st2)
-  Sel1 :: Session m st1 -> Session m (st1 :||: st2)
-  Sel2 :: Session m st2 -> Session m (st1 :||: st2)
+data Session m (ctx :: [SessionType]) (st :: SessionType) where
+  Send :: a -> Session m ctx st -> Session m ctx (a :!> st)
+  Receive :: (a -> Session m ctx st) -> Session m ctx (a :?> st)
+  Done :: Session m ctx End
+  Lift :: m a -> (a -> Session m ctx st) -> Session m ctx st
+  Branch :: Session m ctx st1 -> Session m ctx st2 -> Session m ctx (st1 :&&: st2)
+  Sel1 :: Session m ctx st1 -> Session m ctx (st1 :||: st2)
+  Sel2 :: Session m ctx st2 -> Session m ctx (st1 :||: st2)
 
-send :: a -> Session m st -> Session m (a :!> st)
+  Rec :: Session m (st : ctx) st -> Session m ctx (Mu st)
+  Unfold :: Session m (st : ctx) st -> Session m (st : ctx) Var
+  Weaken :: Session m ctx st -> Session m (st' : ctx) (Wk st)
+
+send :: a -> Session m ctx st -> Session m ctx (a :!> st)
 send = Send
 
-receive :: (a -> Session m st) -> Session m (a :?> st)
+receive :: (a -> Session m ctx st) -> Session m ctx (a :?> st)
 receive = Receive
 
-done :: Session m End
+done :: Session m ctx End
 done = Done
 
-lift :: m a -> (a -> Session m st) -> Session m st
+lift :: m a -> (a -> Session m ctx st) -> Session m ctx st
 lift = Lift
 
-lift_ :: m a -> Session m st -> Session m st
+lift_ :: m a -> Session m ctx st -> Session m ctx st
 lift_ m k = lift m (const k)
 
 branch = Branch
 sel1 = Sel1
 sel2 = Sel2
 
-example :: Session IO ExampleSession
+rec = Rec
+unfold = Unfold
+weaken = Weaken
+
+
+example :: Session IO ctx ExampleSession
 example =
   send 65 $ receive $ \ c -> lift_ (print c) $ send (ord c) $ done
 
-match :: (Dual (Dual st) ~ st, Monad m) => Session m st -> Session m (Dual st) -> m ()
+type family Duals (ctx :: [SessionType]) :: [SessionType] where
+  Duals '[] = '[]
+  Duals (st : ctx) = Dual st : Duals ctx
+
+match :: (Monad m) => Session m ctx st -> Session m (Duals ctx) (Dual st) -> m ()
 match Done Done = P.return ()
 match (Send a1 k1) (Receive k2) = match k1 (k2 a1)
--- match (Receive k1) (Send a2 k2) = match (k1 a2) k2
+match (Receive k1) (Send a2 k2) = match (k1 a2) k2
 match (Lift m1 k1) s2 = m1 P.>>= \ a -> match (k1 a) s2
--- match s1 (Lift m2 k2) = m2 >>= \ a -> match s1 (k2 a)
+match s1 (Lift m2 k2) = m2 P.>>= \ a -> match s1 (k2 a)
 match (Branch k1 _) (Sel1 k2) = match k1 k2
 match (Branch _ k1) (Sel2 k2) = match k1 k2
--- match (Sel1 k1) (Branch k2 _) = match k1 k2
--- match (Sel2 k1) (Branch _ k2) = match k1 k2
-match s1 s2 = match s2 s1
+match (Sel1 k1) (Branch k2 _) = match k1 k2
+match (Sel2 k1) (Branch _ k2) = match k1 k2
+match (Rec k1) (Rec k2) = match k1 k2
+match (Unfold k1) (Unfold k2) = match k1 k2
+match (Weaken k1) (Weaken k2) = match k1 k2
 
-example' :: Session IO (Dual ExampleSession)
+example' :: Session IO ctx (Dual ExampleSession)
 example' =
   receive $ \ i ->
   send (chr i) $
@@ -94,6 +117,7 @@ example' =
   lift_ (print (i == j)) $
   done
 
+{-
 class HasTerminal (st :: SessionType) where
   terminal :: Session IO st
 
@@ -183,3 +207,31 @@ toSession (MkSession_ f) = f (const Done)
 return = ireturn
 (>>=) = (>>>=)
 (>>) = (>>>)
+-}
+
+
+sumServer :: Session m ctx (Mu (Int :!> End :&&: Int :?> Var))
+sumServer =
+  rec (sumLoop 0)
+
+sumLoop total =
+  branch
+    (send total $ done)
+    (receive $ \ i -> unfold $ sumLoop (total + i))
+
+sumClient :: Session IO ctx (Mu (Int :?> End :||: Int :!> Var))
+sumClient =
+  rec $
+  sel2 $
+  send 7 $
+  unfold $
+  sel2 $
+  send 8 $
+  unfold $
+  sel2 $
+  send 9 $
+  unfold $
+  sel1 $
+  receive $ \ total ->
+  lift_ (print total) $
+  done
